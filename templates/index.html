@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Cyber Packet Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Tailwind (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    .glass { backdrop-filter: blur(12px); background: linear-gradient(135deg, rgba(255,255,255,.07), rgba(255,255,255,.03)); border: 1px solid rgba(255,255,255,.12); }
+    .gauge { width: 180px; height: 180px; border-radius: 9999px; position: relative; background: conic-gradient(var(--gauge-color, #22c55e) var(--p,0deg), #0b1220 0); }
+    .gauge::after { content: attr(data-label); position: absolute; inset: 20px; background:#0b1220; border-radius:9999px; display:grid; place-items:center; color:#e5e7eb; font-weight:800; font-size:1.1rem; }
+    .toast { animation: fade .25s ease-out; }
+    @keyframes fade { from { opacity:0; transform: translateY(6px) } to { opacity:1; transform:none } }
+    .badge { border-radius: 9999px; padding:.32rem .6rem; font-weight:700; font-size:.78rem; letter-spacing:.02em }
+    .card-h { min-height: 120px; }
+  </style>
+</head>
+
+<body class="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-slate-100">
+  <!-- Header -->
+  <header class="px-6 py-4 flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl md:text-3xl font-extrabold">🛡️ Cyber Packet Dashboard</h1>
+      <p class="text-slate-400 text-sm">Real-time OS network counters • Flask + SSE + Chart.js</p>
+    </div>
+    <div class="flex gap-3">
+      <button id="freezeBtn" class="glass px-4 py-2 rounded-xl hover:bg-white/10 transition">⏸ Freeze</button>
+      <button id="clearBtn" class="glass px-4 py-2 rounded-xl hover:bg-white/10 transition">🧹 Clear</button>
+    </div>
+  </header>
+
+  <!-- KPIs -->
+  <section class="px-6 grid grid-cols-1 md:grid-cols-4 gap-4">
+    <div class="glass rounded-2xl p-5 card-h">
+      <div class="text-slate-400 text-sm">Throughput</div>
+      <div class="mt-1 flex items-baseline gap-2">
+        <div class="text-3xl font-extrabold"><span id="throughput">0.00</span></div>
+        <div class="text-slate-400 text-lg">MB/s</div>
+      </div>
+      <div class="text-slate-400 text-xs mt-2">Raw: <span id="throughputRaw">0 bps</span></div>
+    </div>
+
+    <div class="glass rounded-2xl p-5 card-h">
+      <div class="text-slate-400 text-sm">Packets / sec</div>
+      <div class="text-3xl font-extrabold mt-1" id="pps">0.00</div>
+      <div class="text-slate-400 text-xs mt-2">Windowed z-score burst detection</div>
+    </div>
+
+    <div class="glass rounded-2xl p-5 card-h">
+      <div class="text-slate-400 text-sm">Connections</div>
+      <div class="mt-2 flex flex-wrap gap-2">
+        <span id="activeBadge" class="badge bg-cyan-500/20 border border-cyan-400/30 text-cyan-200">ACTIVE 0</span>
+        <span id="estBadge" class="badge bg-violet-500/20 border border-violet-400/30 text-violet-200">EST 0</span>
+      </div>
+      <div class="text-slate-400 text-xs mt-2">Active = psutil.CONN_ESTABLISHED count</div>
+    </div>
+
+    <div class="glass rounded-2xl p-5 flex items-center gap-5 card-h">
+      <div id="gauge" class="gauge" style="--p:0deg" data-label="Score 0"></div>
+      <div>
+        <div class="text-slate-400 text-sm">Network Health</div>
+        <p class="text-slate-300 text-sm">EWMA score with error/drop penalties</p>
+        <div class="text-slate-400 text-xs mt-1">0-100 (higher is better)</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Charts & Alerts -->
+  <main class="p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <section class="glass rounded-2xl p-6 col-span-1">
+      <h2 class="text-lg font-bold mb-4">Throughput (MB/s)</h2>
+      <canvas id="tpChart" height="160"></canvas>
+    </section>
+
+    <section class="glass rounded-2xl p-6 col-span-1">
+      <h2 class="text-lg font-bold mb-4">Packets / sec</h2>
+      <canvas id="ppsChart" height="160"></canvas>
+      <div id="alerts" class="mt-4 space-y-2"></div>
+    </section>
+
+    <section class="glass rounded-2xl p-6 col-span-1">
+      <h2 class="text-lg font-bold mb-2">Interface Alerts (Δ last 1s)</h2>
+      <div class="grid grid-cols-2 gap-3">
+        <div class="bg-white/5 rounded-xl p-4"><div class="text-slate-400 text-xs">Errors In</div><div id="errIn" class="text-xl font-bold">0</div></div>
+        <div class="bg-white/5 rounded-xl p-4"><div class="text-slate-400 text-xs">Errors Out</div><div id="errOut" class="text-xl font-bold">0</div></div>
+        <div class="bg-white/5 rounded-xl p-4"><div class="text-slate-400 text-xs">Drops In</div><div id="dropIn" class="text-xl font-bold">0</div></div>
+        <div class="bg-white/5 rounded-xl p-4"><div class="text-slate-400 text-xs">Drops Out</div><div id="dropOut" class="text-xl font-bold">0</div></div>
+      </div>
+    </section>
+
+    <section class="glass rounded-2xl p-6 col-span-1 lg:col-span-3">
+      <h2 class="text-lg font-bold mb-3">Activity Log</h2>
+      <div id="log" class="h-48 overflow-y-auto bg-black/30 rounded-xl p-3 text-xs md:text-sm font-mono"></div>
+    </section>
+  </main>
+
+  <!-- Toasts -->
+  <div id="toasts" class="fixed bottom-4 right-4 space-y-2"></div>
+
+  <script>
+    // ----- Chart setup -----
+    const mkLine = (label, color) => ({
+      type: 'line',
+      data: { labels: [], datasets: [{ label, data: [], borderWidth: 2, tension: .25, fill: false, borderColor: color }] },
+      options: {
+        animation: false, responsive: true,
+        scales: { x: { ticks: { color: '#9CA3AF' } }, y: { ticks: { color: '#9CA3AF' }, beginAtZero: true } },
+        plugins: { legend: { display: false } }
+      }
+    });
+
+    const tpChart = new Chart(document.getElementById('tpChart').getContext('2d'), mkLine('MB/s', '#22c55e'));
+    const ppsChart = new Chart(document.getElementById('ppsChart').getContext('2d'), mkLine('Packets/sec', '#60a5fa'));
+
+    // ----- UI refs -----
+    const el = {
+      throughput: document.getElementById('throughput'),
+      throughputRaw: document.getElementById('throughputRaw'),
+      pps: document.getElementById('pps'),
+      errIn: document.getElementById('errIn'),
+      errOut: document.getElementById('errOut'),
+      dropIn: document.getElementById('dropIn'),
+      dropOut: document.getElementById('dropOut'),
+      activeBadge: document.getElementById('activeBadge'),
+      estBadge: document.getElementById('estBadge'),
+      gauge: document.getElementById('gauge'),
+      log: document.getElementById('log'),
+      alerts: document.getElementById('alerts'),
+      toasts: document.getElementById('toasts'),
+      freezeBtn: document.getElementById('freezeBtn'),
+      clearBtn: document.getElementById('clearBtn'),
+    };
+
+    // ----- Controls -----
+    let frozen = false;
+    el.freezeBtn.onclick = () => { frozen = !frozen; el.freezeBtn.textContent = frozen ? '▶ Resume' : '⏸ Freeze'; toast(frozen ? 'Stream paused' : 'Stream resumed'); };
+    el.clearBtn.onclick = () => {
+      tpChart.data.labels = []; tpChart.data.datasets[0].data = [];
+      ppsChart.data.labels = []; ppsChart.data.datasets[0].data = [];
+      tpChart.update(); ppsChart.update();
+      el.alerts.innerHTML = ''; el.log.innerHTML = '';
+      toast('Cleared charts & log');
+    };
+
+    // ----- SSE stream -----
+    const es = new EventSource('/stream');
+    es.onmessage = (ev) => {
+      if (frozen) return;
+      const d = JSON.parse(ev.data);
+      const t = new Date(d.ts * 1000).toLocaleTimeString();
+
+      // Numbers
+      const mbps = d.throughput_bps / 1_000_000; // use raw bps from backend
+      el.throughput.textContent = mbps.toFixed(2);
+      el.throughputRaw.textContent = `${d.throughput_bps.toLocaleString()} bps`;
+      el.pps.textContent = Number(d.pkts_per_sec).toFixed(2);
+
+      // Connections (backend gives active_conns; also show same as EST)
+      el.activeBadge.textContent = `ACTIVE ${d.active_conns}`;
+      el.estBadge.textContent = `EST ${d.active_conns}`;
+
+      // Errors / drops
+      el.errIn.textContent = d.errors.in;
+      el.errOut.textContent = d.errors.out;
+      el.dropIn.textContent = d.errors.drop_in;
+      el.dropOut.textContent = d.errors.drop_out;
+
+      // Gauge color by health
+      const health = Number(d.health) || 0;
+      const deg = Math.round((health/100) * 360);
+      const color = health >= 75 ? '#22c55e' : (health >= 45 ? '#f59e0b' : '#ef4444');
+      el.gauge.style.setProperty('--p', deg + 'deg');
+      el.gauge.style.setProperty('--gauge-color', color);
+      el.gauge.setAttribute('data-label', `Score ${health}`);
+
+      // Charts
+      push(tpChart, t, mbps);
+      push(ppsChart, t, d.pkts_per_sec);
+
+      // Log
+      logLine(`@${t}  MB/s=${mbps.toFixed(2)}  PPS=${Number(d.pkts_per_sec).toFixed(2)}  Active=${d.active_conns}  Health=${health}`);
+
+      // Burst alert flag from backend
+      if (d.burst) showAlert({type:'burst', msg:`Burst detected: ${Number(d.pkts_per_sec).toFixed(1)} pkts/s`});
+    };
+
+    // Helpers
+    function push(chart, label, value) {
+      chart.data.labels.push(label);
+      chart.data.datasets[0].data.push(value);
+      if (chart.data.labels.length > 120) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
+      chart.update();
+    }
+
+    function logLine(text) {
+      const line = document.createElement('div');
+      line.textContent = text;
+      el.log.prepend(line);
+      if (el.log.childElementCount > 200) el.log.removeChild(el.log.lastChild);
+    }
+
+    function showAlert(a) {
+      const palette = a.type === 'burst' ? ['red-500/20','red-400/30','red-200'] : ['amber-500/20','amber-400/30','amber-200'];
+      const div = document.createElement('div');
+      div.className = `toast border border-${palette[1]} bg-${palette[0]} text-${palette[2]} px-3 py-2 rounded-lg`;
+      div.textContent = `⚠ ${a.msg}`;
+      el.alerts.prepend(div);
+      toast(a.msg);
+      setTimeout(()=>div.remove(), 7000);
+    }
+
+    function toast(msg) {
+      const n = document.createElement('div');
+      n.className = 'toast bg-white/10 border border-white/20 px-3 py-2 rounded-lg';
+      n.textContent = msg;
+      el.toasts.appendChild(n);
+      setTimeout(()=> n.remove(), 1800);
+    }
+  </script>
+</body>
+</html>
